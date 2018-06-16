@@ -1,0 +1,8 @@
+[package]
+name = "chip8-rs"
+version = "0.1.0"
+authors = ["JellySquid <jellysquid@protonmail.com>"]
+
+[dependencies]
+xorshift = "0.1"
+sdl2 = "0.31.0"
