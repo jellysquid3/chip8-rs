@@ -1,6 +1,3 @@
-extern crate sdl2;
-extern crate xorshift;
-
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -9,82 +6,84 @@ use std::time::Duration;
 
 use xorshift::{Rng, SeedableRng, Xoroshiro128};
 
+use sdl2::Sdl;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use sdl2::pixels::Color;
-use sdl2::rect::Rect;
-use sdl2::{Sdl, VideoSubsystem};
+use sdl2::pixels::{PixelFormatEnum};
+use sdl2::render::{TextureAccess, WindowCanvas};
 
 const FRAMEBUFFER_WIDTH: usize = 64;
 const FRAMEBUFFER_HEIGHT: usize = 32;
-const FRAMEBUFFER_SCALE: usize = 16;
+const FRAMEBUFFER_SIZE: usize = FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT;
+const FRAMEBUFFER_PITCH: usize = FRAMEBUFFER_WIDTH * 4;
+
+const DISPLAY_SCALE: usize = 16;
 
 fn main() {
     let rom_path = env::args().skip(1).next().expect("Missing path argument");
 
     let mut rom: Vec<u8> = Vec::new();
 
-    let mut rom_file = File::open(rom_path).expect("Failed to open ROM file");
+    let mut rom_file = File::open(rom_path)
+        .expect("Failed to open ROM file");
     rom_file
         .read_to_end(&mut rom)
         .expect("Failed to read ROM file");
 
-    let mut app = Application::new();
-    app.run(rom);
+    let mut app = Application::new(rom);
+    app.run();
 }
 
 struct Application {
-    sdl_context: Sdl,
-    video_sys: VideoSubsystem,
-
-    color_bg: Color,
-    color_fg: Color,
+    sdl: Sdl,
+    cpu: Chip8,
+    canvas: WindowCanvas
 }
 
 impl Application {
-    pub fn new() -> Self {
-        let sdl_context = sdl2::init().expect("Failed to initialize SDL2");
-        
-        let video_sys = sdl_context
+    pub fn new(rom: Vec<u8>) -> Self {
+        let sdl = sdl2::init().expect("Failed to initialize SDL2");
+        let video_sys = sdl
             .video()
             .expect("Failed to initialize SDL2 Video");
 
-        Application {
-            sdl_context,
-            video_sys,
+        let cpu = Chip8::new(&rom)
+            .expect("Failed to initialize CHIP-8 CPU");
 
-            color_bg: Color::RGB(0, 0, 0),
-            color_fg: Color::RGB(255, 255, 255),
-        }
-    }
-
-    pub fn run(&mut self, rom: Vec<u8>) {
-        let mut chip8 = Chip8::new(&rom).expect("Failed to initialize CHIP-8 emulator");
-
-        let window = self.video_sys
-            .window(
-                "chip8-rs",
-                64 * FRAMEBUFFER_SCALE as u32,
-                32 * FRAMEBUFFER_SCALE as u32,
-            )
+        let window = video_sys
+            .window("chip8-rs",
+                    (FRAMEBUFFER_WIDTH * DISPLAY_SCALE) as u32,
+                    (FRAMEBUFFER_HEIGHT * DISPLAY_SCALE) as u32)
             .opengl()
             .position_centered()
             .build()
             .expect("Failed to create SDL2 window");
 
-        let mut canvas = window
+        let canvas = window
             .into_canvas()
             .build()
             .expect("Failed to create SDL2 window surface");
-        canvas.set_draw_color(self.color_bg);
-        canvas.clear();
-        canvas.present();
 
-        let mut events = self.sdl_context
+        Application {
+            sdl,
+            cpu,
+            canvas
+        }
+    }
+
+    pub fn run(&mut self) {
+        let mut events = self.sdl
             .event_pump()
             .expect("Failed to create event pump");
 
         let mut close = false;
+
+        let texture_creator = self.canvas.texture_creator();
+
+        let mut texture = texture_creator
+            .create_texture(PixelFormatEnum::RGB888, TextureAccess::Streaming,
+                            FRAMEBUFFER_WIDTH as u32, FRAMEBUFFER_HEIGHT as u32)
+            .expect("Failed to create streaming texture");
 
         while !close {
             for event in events.poll_iter() {
@@ -92,69 +91,45 @@ impl Application {
                     Event::Quit { .. } => close = true,
                     Event::KeyDown { keycode, .. } => {
                         if let Some(key) = keycode {
-                            chip8.set_key_state(key, true);
+                            self.cpu.set_key_state(key, true);
                         }
                     }
                     Event::KeyUp { keycode, .. } => {
                         if let Some(key) = keycode {
-                            chip8.set_key_state(key, false);
+                            self.cpu.set_key_state(key, false);
                         }
                     }
                     _ => (),
                 }
             }
 
-            chip8.emulate_cycle();
+            self.cpu.step();
 
-            if chip8.should_redraw() {
-                canvas.set_draw_color(self.color_bg);
-                canvas.clear();
+            texture.update(None, self.cpu.get_framebuffer(), FRAMEBUFFER_PITCH)
+                .expect("Failed to update texture");
 
-                canvas.set_draw_color(self.color_fg);
+            self.canvas.copy(&texture, None, None)
+                .expect("Failed to copy texture");
 
-                {
-                    let framebuffer = chip8.get_framebuffer();
-
-                    for x in 0..FRAMEBUFFER_WIDTH {
-                        for y in 0..FRAMEBUFFER_HEIGHT {
-                            let pixel = framebuffer[(x + (y * FRAMEBUFFER_WIDTH)) as usize];
-
-                            if pixel > 0 {
-                                canvas
-                                    .fill_rect(Rect::new(
-                                        (x * FRAMEBUFFER_SCALE) as i32,
-                                        (y * FRAMEBUFFER_SCALE) as i32,
-                                        FRAMEBUFFER_SCALE as u32,
-                                        FRAMEBUFFER_SCALE as u32,
-                                    ))
-                                    .unwrap();
-                            }
-                        }
-                    }
-                }
-
-                canvas.present();
-
-                chip8.clear_redraw_flag();
-            }
+            self.canvas.present();
 
             if cfg!(debug_assertions) {
                 print!(
                     "OP:\t{:04X}\t| PC: \t{:04X}\t| I:\t{:04X}\t| SP:\t{:02X}\t",
-                    chip8.get_opcode(),
-                    chip8.get_program_counter(),
-                    chip8.get_program_index(),
-                    chip8.get_stack_pointer()
+                    self.cpu.get_opcode(),
+                    self.cpu.get_program_counter(),
+                    self.cpu.get_program_index(),
+                    self.cpu.get_stack_pointer()
                 );
 
                 print!("\nS: \t");
-                chip8
+                self.cpu
                     .get_stack()
                     .iter()
                     .for_each(|b| print!("{:04X} ", b));
 
                 print!("\nV: \t");
-                chip8
+                self.cpu
                     .get_registers()
                     .iter()
                     .for_each(|b| print!("{:02X} ", b));
@@ -170,7 +145,7 @@ impl Application {
 struct Chip8 {
     memory: [u8; 4096],
     registers: [u8; 16],
-    framebuffer: [u8; FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT],
+    framebuffer: [u32; FRAMEBUFFER_SIZE],
     stack: [u16; 16],
     keys: [bool; 16],
     opcode: u16,
@@ -184,7 +159,6 @@ struct Chip8 {
     delay_timer: u8,
     sound_timer: u8,
 
-    redraw_flag: bool,
     beep_flag: bool,
 
     last_key: Option<usize>,
@@ -195,7 +169,7 @@ impl Chip8 {
         let mut chip8 = Chip8 {
             memory: [0; 4096],
             registers: [0; 16],
-            framebuffer: [0; FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT],
+            framebuffer: [0; FRAMEBUFFER_SIZE],
             stack: [0; 16],
             keys: [false; 16],
             opcode: 0,
@@ -204,12 +178,11 @@ impl Chip8 {
             program_counter: 0,
             stack_pointer: 0,
 
-            random: Xoroshiro128::from_seed(&[0u64, 0u64]),
+            random: Xoroshiro128::from_seed(&[0x7020de7ee5e88ab7, 0xe587fbb5ba4fccee]),
 
             delay_timer: 0,
             sound_timer: 0,
 
-            redraw_flag: false,
             beep_flag: false,
 
             last_key: None,
@@ -221,18 +194,18 @@ impl Chip8 {
         Ok(chip8)
     }
 
-    fn load_fontset(&mut self, bytes: &[u8]) -> Result<usize, String> {
+    fn load_fontset(&mut self, bytes: &[u8]) -> Result<(), String> {
         let start = 0x050;
         let end = 0x0A0;
+        let len = end - start;
 
-        if bytes.len() > end - start {
-            Err(format!("Fontset ROM exceeds maximum size (cap: {}, len: {})", end - start, bytes.len()))
+        if bytes.len() > len {
+            Err(format!("Fontset ROM exceeds maximum size (cap: {}, len: {})", len, bytes.len()))
         } else {
-            for i in 0..bytes.len() {
-                self.memory[start + i] = bytes[i];
-            }
+            self.memory[start..end]
+                .copy_from_slice(bytes);
 
-            Ok(self.memory.len())
+            Ok(())
         }
     }
 
@@ -257,7 +230,7 @@ impl Chip8 {
         }
     }
 
-    fn emulate_cycle(&mut self) {
+    fn step(&mut self) {
         self.opcode = (self.memory[self.program_counter as usize] as u16) << 8
             | self.memory[self.program_counter as usize + 1] as u16;
 
@@ -270,9 +243,7 @@ impl Chip8 {
                     }
                     // 00E0 - Clear framebuffer
                     0x00E0 => {
-                        self.framebuffer = [0u8; FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT];
-                        self.redraw_flag = true;
-
+                        self.framebuffer.fill(0);
                         self.program_counter += 2;
                     }
                     // 00EE - Returns from subroutine
@@ -425,29 +396,35 @@ impl Chip8 {
             }
             // DXYN - Draws a sprite at coordinates (VX, VY) that has the dimensions of 8xN
             0xD000 => {
-                let x = self.registers[(self.opcode as usize & 0x0F00) >> 8] as usize;
-                let y = self.registers[(self.opcode as usize & 0x00F0) >> 4] as usize;
+                let dst_x = self.registers[(self.opcode as usize & 0x0F00) >> 8] as usize;
+                let dst_y = self.registers[(self.opcode as usize & 0x00F0) >> 4] as usize;
 
+                let width = 8;
                 let height = (self.opcode & 0x000F) as usize;
 
                 self.registers[0xF] = 0;
 
-                for y_line in 0..height {
-                    let pixel = self.memory[self.index as usize + y_line];
+                for y in 0..height {
+                    let src_pixel = self.memory[self.index as usize + y];
 
-                    for x_line in 0..8 {
-                        if (pixel & (0x80 >> x_line)) != 0 {
-                            if self.framebuffer[(x + x_line + ((y + y_line) * 64))] == 1 {
+                    for x in 0..width {
+                        if dst_x + x >= FRAMEBUFFER_WIDTH || dst_y + y >= FRAMEBUFFER_HEIGHT {
+                            continue;
+                        }
+
+                        if (src_pixel & (0x80 >> x)) != 0 {
+                            let dst = (dst_x + x) + ((dst_y + y) * FRAMEBUFFER_WIDTH);
+
+                            if self.framebuffer[dst] != 0 {
                                 self.registers[0xF] = 1;
                             }
 
-                            self.framebuffer[(x + x_line + ((y + y_line) * 64))] ^= 1;
+                            self.framebuffer[dst] ^= 0xFFFFFFFF;
                         }
                     }
                 }
 
                 self.program_counter += 2;
-                self.redraw_flag = true;
             }
             0xE000 => {
                 let x = (self.opcode as usize & 0x0F00) >> 8;
@@ -563,16 +540,13 @@ impl Chip8 {
         &self.registers
     }
 
-    pub fn get_framebuffer(&self) -> &[u8; (FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT) as usize] {
-        &self.framebuffer
-    }
+    pub fn get_framebuffer(&self) -> &[u8] {
+        let len = self.framebuffer.len();
+        let ptr = self.framebuffer.as_ptr() as *const u8;
 
-    pub fn should_redraw(&self) -> bool {
-        self.redraw_flag
-    }
-
-    pub fn clear_redraw_flag(&mut self) {
-        self.redraw_flag = false;
+        unsafe {
+            std::slice::from_raw_parts(ptr, len * 4)
+        }
     }
 
     pub fn get_stack(&self) -> &[u16; 16] {

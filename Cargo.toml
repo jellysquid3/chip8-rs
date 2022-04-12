@@ -1,8 +1,12 @@
 [package]
 name = "chip8-rs"
-version = "0.1.0"
-authors = ["JellySquid <jellysquid@protonmail.com>"]
+version = "0.1.1"
+authors = ["JellySquid"]
+edition = "2021"
 
 [dependencies]
 xorshift = "0.1"
-sdl2 = "0.31.0"
+sdl2 = "0.35"
+
+[profile.release]
+lto = true
